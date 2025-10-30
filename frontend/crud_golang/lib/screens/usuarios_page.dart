@@ -91,8 +91,10 @@ class _UsuariosPageState extends State<UsuariosPage> {
     try {
       final data = await _localService.getUsuarios();
       setState(() => usuarios = data);
-    } catch (e) {
-      _mostrarMensaje('Error al listar usuarios: $e', isError: true);
+      _mostrarMensaje('Lista cargada', isError: false);
+    }
+    catch (e)
+    { _mostrarMensaje('Error al listar usuarios: $e', isError: true);
     }
   }
 
@@ -121,13 +123,14 @@ class _UsuariosPageState extends State<UsuariosPage> {
         _mostrarMensaje('Usuario encontrado localmente', isError: false);
       } else {
         usuario = await ApiService.getUsuarioById(id);
+        _mostrarMensaje('Usuario encontrado en el servidor', isError: false);
+
         if (usuario == null) {
           _mostrarMensaje('Usuario no encontrado en el servidor', isError: true);
           return;
         }
         await _localService.insertUsuario(usuario);
       }
-
 
       if (usuario != null) {
         setState(() => usuarios = [usuario!]);
@@ -136,16 +139,19 @@ class _UsuariosPageState extends State<UsuariosPage> {
     } catch (e) {
       _mostrarMensaje('Error al buscar usuario: $e', isError: true);
     }
-
   }
 
-  void agregarUsuario() async {
+  Future<void> agregarUsuario() async {
     if (nombreController.text.isEmpty ||
         correoController.text.isEmpty ||
         edadController.text.isEmpty) {
       _mostrarMensaje('Complete todos los campos', isError: true);
       return;
     }
+
+    bool confirmar = await _confirmarAccion(
+        '¿Desea agregar este usuario?');
+    if (!confirmar) return;
 
     final usuario = Usuario(
       nombre: nombreController.text,
@@ -159,9 +165,10 @@ class _UsuariosPageState extends State<UsuariosPage> {
       _mostrarMensaje('Usuario guardado localmente', isError: false);
 
       if (!modoOffline) {
-        // Guardar en servidor
         final u = await ApiService.createUsuario(usuario);
         await _localService.updateUsuario(u);
+        _mostrarMensaje('Usuario guardado en el servidor', isError: false);
+
       }
 
       listarUsuarios();
@@ -171,11 +178,15 @@ class _UsuariosPageState extends State<UsuariosPage> {
     }
   }
 
-  void actualizarUsuario() async {
+  Future<void> actualizarUsuario() async {
     if (usuarioEditando == null) {
       _mostrarMensaje('Seleccione un usuario', isError: true);
       return;
     }
+
+    bool confirmar = await _confirmarAccion(
+        '¿Desea actualizar este usuario?');
+    if (!confirmar) return;
 
     usuarioEditando!
       ..nombre = nombreController.text
@@ -201,7 +212,11 @@ class _UsuariosPageState extends State<UsuariosPage> {
     }
   }
 
-  void eliminarUsuarioOffline(Usuario u) async {
+  Future<void> eliminarUsuarioOffline(Usuario u) async {
+    bool confirmar = await _confirmarAccion(
+        '¿Desea eliminar este usuario?');
+    if (!confirmar) return;
+
     u.sincronizado = -1;
     await _localService.updateUsuario(u);
     _mostrarMensaje('Usuario marcado para eliminación offline', isError: false);
@@ -209,6 +224,8 @@ class _UsuariosPageState extends State<UsuariosPage> {
     if (!modoOffline) {
       await ApiService.deleteUsuario(u.id!);
       await _localService.deleteUsuario(u.id!);
+      _mostrarMensaje('Usuario eliminado en el servidor', isError: false);
+
     }
 
     listarUsuarios();
@@ -247,6 +264,27 @@ class _UsuariosPageState extends State<UsuariosPage> {
         duration: const Duration(seconds: 2),
       ),
     );
+  }
+
+  Future<bool> _confirmarAccion(String mensaje) async {
+    return await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirmación'),
+        content: Text(mensaje),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Aceptar'),
+          ),
+        ],
+      ),
+    ) ??
+        false;
   }
 
   void _resetearSincronizacionAutomatica() {
@@ -344,11 +382,14 @@ class _UsuariosPageState extends State<UsuariosPage> {
                         children: [
                           Text(u.id?.toString() ?? ''),
                           if (u.sincronizado == -1)
-                            const Icon(Icons.delete_forever, color: Colors.orange, size: 16)
+                            const Icon(Icons.delete_forever,
+                                color: Colors.orange, size: 16)
                           else if (u.sincronizado == 0)
-                            const Icon(Icons.sync_problem, color: Colors.orange, size: 16)
+                            const Icon(Icons.sync_problem,
+                                color: Colors.orange, size: 16)
                           else
-                            const Icon(Icons.check_circle, color: Colors.green, size: 16),
+                            const Icon(Icons.check_circle,
+                                color: Colors.green, size: 16),
                         ],
                       ),
                       trailing: Wrap(
