@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../models/usuario.dart';
 import '../services/local_storage_service.dart';
+import '../services/api_service.dart';
 import '../services/sync_service.dart';
 
 class UsuariosPage extends StatefulWidget {
@@ -28,7 +29,7 @@ class _UsuariosPageState extends State<UsuariosPage> {
   bool modoOffline = true;
   String estadoConexion = "Desconectado";
 
-  bool primeraSincronizacion = true; // controla si ya se hizo la primera sincronización manual
+  bool primeraSincronizacion = true;
   Timer? _autoSyncTimer;
 
   @override
@@ -90,14 +91,58 @@ class _UsuariosPageState extends State<UsuariosPage> {
     try {
       final data = await _localService.getUsuarios();
       setState(() => usuarios = data);
-
     } catch (e) {
       _mostrarMensaje('Error al listar usuarios: $e', isError: true);
     }
   }
 
+  void buscarUsuario() async {
+    final idText = idController.text.trim();
+    if (idText.isEmpty) {
+      _mostrarMensaje('Ingrese un ID para buscar', isError: true);
+      return;
+    }
+
+    final id = int.tryParse(idText);
+    if (id == null) {
+      _mostrarMensaje('ID inválido', isError: true);
+      return;
+    }
+
+    try {
+      Usuario? usuario;
+
+      if (modoOffline) {
+        usuario = await _localService.getUsuarioById(id);
+        if (usuario == null) {
+          _mostrarMensaje('Usuario no encontrado localmente', isError: true);
+          return;
+        }
+        _mostrarMensaje('Usuario encontrado localmente', isError: false);
+      } else {
+        usuario = await ApiService.getUsuarioById(id);
+        if (usuario == null) {
+          _mostrarMensaje('Usuario no encontrado en el servidor', isError: true);
+          return;
+        }
+        await _localService.insertUsuario(usuario);
+      }
+
+
+      if (usuario != null) {
+        setState(() => usuarios = [usuario!]);
+      }
+
+    } catch (e) {
+      _mostrarMensaje('Error al buscar usuario: $e', isError: true);
+    }
+
+  }
+
   void agregarUsuario() async {
-    if (nombreController.text.isEmpty || correoController.text.isEmpty || edadController.text.isEmpty) {
+    if (nombreController.text.isEmpty ||
+        correoController.text.isEmpty ||
+        edadController.text.isEmpty) {
       _mostrarMensaje('Complete todos los campos', isError: true);
       return;
     }
@@ -112,7 +157,13 @@ class _UsuariosPageState extends State<UsuariosPage> {
     try {
       await _localService.insertUsuario(usuario);
       _mostrarMensaje('Usuario guardado localmente', isError: false);
-      sincronizar();
+
+      if (!modoOffline) {
+        // Guardar en servidor
+        final u = await ApiService.createUsuario(usuario);
+        await _localService.updateUsuario(u);
+      }
+
       listarUsuarios();
       limpiarCampos();
     } catch (e) {
@@ -126,31 +177,23 @@ class _UsuariosPageState extends State<UsuariosPage> {
       return;
     }
 
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Confirmar actualización'),
-        content: const Text('¿Desea actualizar este usuario?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancelar')),
-          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Actualizar')),
-        ],
-      ),
-    );
-
-    if (confirm != true) return;
-
     usuarioEditando!
       ..nombre = nombreController.text
       ..correo = correoController.text
       ..edad = int.parse(edadController.text)
-      ..sincronizado = usuarioEditando!.sincronizado == 1 ? 0 : usuarioEditando!.sincronizado;
+      ..sincronizado = 0;
 
     try {
       await _localService.updateUsuario(usuarioEditando!);
-      _mostrarMensaje('Usuario actualizado localmente', isError: false);
+
+      if (!modoOffline) {
+        await ApiService.updateUsuario(usuarioEditando!.id!, usuarioEditando!);
+        usuarioEditando!.sincronizado = 1;
+        await _localService.updateUsuario(usuarioEditando!);
+      }
+
+      _mostrarMensaje('Usuario actualizado', isError: false);
       usuarioEditando = null;
-      sincronizar();
       listarUsuarios();
       limpiarCampos();
     } catch (e) {
@@ -159,58 +202,23 @@ class _UsuariosPageState extends State<UsuariosPage> {
   }
 
   void eliminarUsuarioOffline(Usuario u) async {
-    setState(() {
-      u.sincronizado = -1;
-    });
+    u.sincronizado = -1;
     await _localService.updateUsuario(u);
     _mostrarMensaje('Usuario marcado para eliminación offline', isError: false);
-    sincronizar();
+
+    if (!modoOffline) {
+      await ApiService.deleteUsuario(u.id!);
+      await _localService.deleteUsuario(u.id!);
+    }
+
+    listarUsuarios();
   }
 
   void restaurarUsuario(Usuario u) async {
-    setState(() {
-      u.sincronizado = 0;
-    });
+    u.sincronizado = 0;
     await _localService.updateUsuario(u);
     _mostrarMensaje('Usuario restaurado', isError: false);
-  }
-
-  void sincronizar() async {
-    if (modoOffline) {
-      _mostrarMensaje('Sin conexión. No se puede sincronizar.', isError: true);
-      return;
-    }
-
-    _mostrarMensaje('Sincronizando...', isError: false);
-    final ok = await _syncService.syncUsuarios();
-    await listarUsuarios();
-
-    if (ok) {
-      _mostrarMensaje('Sincronización completa', isError: false);
-      if (primeraSincronizacion) {
-        primeraSincronizacion = false;
-        _iniciarSincronizacionAutomatica();
-      }
-    } else {
-      _mostrarMensaje('Error al sincronizar', isError: true);
-    }
-  }
-
-  void _iniciarSincronizacionAutomatica() {
-    _autoSyncTimer?.cancel();
-    _autoSyncTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
-      if (!modoOffline) {
-        await _syncService.syncUsuarios();
-        listarUsuarios();
-      }
-    });
-  }
-
-  void _resetearSincronizacionAutomatica() {
-    _autoSyncTimer?.cancel(); // cancelar cualquier sincronización en curso
-    if (!modoOffline && !primeraSincronizacion) {
-      _iniciarSincronizacionAutomatica();
-    }
+    listarUsuarios();
   }
 
   void limpiarCampos() {
@@ -241,6 +249,18 @@ class _UsuariosPageState extends State<UsuariosPage> {
     );
   }
 
+  void _resetearSincronizacionAutomatica() {
+    _autoSyncTimer?.cancel();
+    if (!modoOffline && !primeraSincronizacion) {
+      _autoSyncTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+        if (!modoOffline) {
+          await _syncService.syncUsuarios();
+          listarUsuarios();
+        }
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -250,7 +270,10 @@ class _UsuariosPageState extends State<UsuariosPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.sync),
-            onPressed: sincronizar,
+            onPressed: () async {
+              await _syncService.syncUsuarios();
+              listarUsuarios();
+            },
           ),
         ],
       ),
@@ -260,14 +283,17 @@ class _UsuariosPageState extends State<UsuariosPage> {
           children: [
             Row(
               children: [
-                Icon(modoOffline ? Icons.signal_wifi_off : Icons.wifi,
-                    color: modoOffline ? Colors.red : Colors.green),
+                Icon(
+                  modoOffline ? Icons.signal_wifi_off : Icons.wifi,
+                  color: modoOffline ? Colors.red : Colors.green,
+                ),
                 const SizedBox(width: 8),
                 Text(
                   estadoConexion,
                   style: TextStyle(
-                      color: modoOffline ? Colors.red : Colors.green,
-                      fontWeight: FontWeight.bold),
+                    color: modoOffline ? Colors.red : Colors.green,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ],
             ),
@@ -277,8 +303,14 @@ class _UsuariosPageState extends State<UsuariosPage> {
               decoration: const InputDecoration(labelText: 'ID (buscar/editar)'),
               keyboardType: TextInputType.number,
             ),
-            TextField(controller: nombreController, decoration: const InputDecoration(labelText: 'Nombre')),
-            TextField(controller: correoController, decoration: const InputDecoration(labelText: 'Correo')),
+            TextField(
+              controller: nombreController,
+              decoration: const InputDecoration(labelText: 'Nombre'),
+            ),
+            TextField(
+              controller: correoController,
+              decoration: const InputDecoration(labelText: 'Correo'),
+            ),
             TextField(
               controller: edadController,
               decoration: const InputDecoration(labelText: 'Edad'),
@@ -289,6 +321,7 @@ class _UsuariosPageState extends State<UsuariosPage> {
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
                 ElevatedButton(onPressed: listarUsuarios, child: const Text('Listar')),
+                ElevatedButton(onPressed: buscarUsuario, child: const Text('Buscar')),
                 ElevatedButton(onPressed: agregarUsuario, child: const Text('Agregar')),
                 ElevatedButton(onPressed: actualizarUsuario, child: const Text('Actualizar')),
               ],
