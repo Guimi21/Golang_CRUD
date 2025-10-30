@@ -98,7 +98,7 @@ class _UsuariosPageState extends State<UsuariosPage> {
     }
   }
 
-  void buscarUsuario() async {
+  Future<void> buscarUsuario() async {
     final idText = idController.text.trim();
     if (idText.isEmpty) {
       _mostrarMensaje('Ingrese un ID para buscar', isError: true);
@@ -114,27 +114,35 @@ class _UsuariosPageState extends State<UsuariosPage> {
     try {
       Usuario? usuario;
 
-      if (modoOffline) {
-        usuario = await _localService.getUsuarioById(id);
-        if (usuario == null) {
-          _mostrarMensaje('Usuario no encontrado localmente', isError: true);
-          return;
-        }
-        _mostrarMensaje('Usuario encontrado localmente', isError: false);
-      } else {
+      // 1️⃣ Intentar buscar en el servidor primero
+      try {
         usuario = await ApiService.getUsuarioById(id);
-        _mostrarMensaje('Usuario encontrado en el servidor', isError: false);
 
-        if (usuario == null) {
+        if (usuario != null) {
+          _mostrarMensaje('Usuario encontrado en el servidor', isError: false);
+          // Guardar o actualizar en la base local
+          await _localService.insertUsuario(usuario);
+        } else {
           _mostrarMensaje('Usuario no encontrado en el servidor', isError: true);
+        }
+      } catch (e) {
+        // Error de conexión u otro fallo de API
+        _mostrarMensaje('No se pudo conectar al servidor. Buscando localmente...', isError: true);
+      }
+
+      // 2️⃣ Si no se encontró o hubo error, buscar localmente
+      if (usuario == null) {
+        usuario = await _localService.getUsuarioById(id);
+        if (usuario != null) {
+          _mostrarMensaje('Usuario encontrado localmente', isError: false);
+        } else {
+          _mostrarMensaje('Usuario no encontrado ni en servidor ni localmente', isError: true);
           return;
         }
-        await _localService.insertUsuario(usuario);
       }
 
-      if (usuario != null) {
-        setState(() => usuarios = [usuario!]);
-      }
+      // 3️⃣ Mostrar el resultado en la interfaz
+      setState(() => usuarios = [usuario!]);
 
     } catch (e) {
       _mostrarMensaje('Error al buscar usuario: $e', isError: true);
@@ -309,8 +317,16 @@ class _UsuariosPageState extends State<UsuariosPage> {
           IconButton(
             icon: const Icon(Icons.sync),
             onPressed: () async {
-              await _syncService.syncUsuarios();
-              listarUsuarios();
+              _mostrarMensaje('Sincronizando...', isError: false);
+
+              try {
+                await _syncService.syncUsuarios();
+                // Refrescar lista **después de sincronizar**
+                await listarUsuarios();
+                _mostrarMensaje('Sincronización completada', isError: false);
+              } catch (e) {
+                _mostrarMensaje('Error al sincronizar: $e', isError: true);
+              }
             },
           ),
         ],
