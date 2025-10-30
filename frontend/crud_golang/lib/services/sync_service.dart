@@ -12,44 +12,51 @@ class SyncService {
     bool success = true;
 
     try {
-      // 1️⃣ Eliminar usuarios marcados para eliminación (-1)
+      // 1️⃣ Eliminar usuarios marcados localmente (-1)
       final usuariosEliminados = (await _localService.getUsuarios())
           .where((u) => u.sincronizado == -1)
           .toList();
 
       for (var u in usuariosEliminados) {
         try {
-          final response =
-          await http.delete(Uri.parse('$apiBaseUrl/usuarios/${u.id}'));
-          if (response.statusCode == 200 || response.statusCode == 204) {
-            await _localService.deleteUsuario(u.id!);
+          if (u.id != null) {
+            final response = await http.delete(
+              Uri.parse('$apiBaseUrl/usuarios/${u.id}'),
+            );
+            if (response.statusCode == 200 || response.statusCode == 204) {
+              await _localService.deleteUsuario(u.id!);
+            } else {
+              print('❌ Error eliminando usuario ${u.id} en servidor: ${response.statusCode}');
+              success = false;
+            }
           } else {
-            print('Error eliminando usuario ${u.id} en servidor: ${response.statusCode}');
-            success = false;
+            // Usuario sin ID (creado offline y luego eliminado sin sincronizar)
+            await _localService.deleteUsuario(u.id!);
           }
         } catch (e) {
-          print('Error eliminando usuario ${u.id} en servidor: $e');
+          print('❌ Error eliminando usuario ${u.id} en servidor: $e');
           success = false;
         }
       }
 
-      // 2️⃣ Sincronizar usuarios pendientes (sincronizado != 1)
+      // 2️⃣ Obtener usuarios pendientes (sincronizado != 1)
       final usuariosPendientes = await _localService.getUsuariosNoSincronizados();
 
-      // Traer todos los usuarios remotos
+      // 3️⃣ Obtener lista actual de usuarios del servidor
       final remoteUsuarios = await _fetchRemoteUsuarios();
 
+      // 4️⃣ Subir cambios locales (crear/actualizar)
       for (var local in usuariosPendientes) {
         try {
           if (local.id != null && local.id != 0) {
-            // Usuario existente: buscar en remoto
+            // Usuario existente → buscar si está en remoto
             final remote = remoteUsuarios.firstWhere(
                   (r) => r.id == local.id,
               orElse: () => Usuario(id: 0, nombre: '', correo: '', edad: 0),
             );
 
             if (remote.id != 0) {
-              // Actualizar si hay diferencias
+              // Existe → actualizar si hay diferencias
               if (_isDifferent(local, remote)) {
                 await _updateUsuarioBackend(local);
               } else {
@@ -57,41 +64,31 @@ class SyncService {
                 await _localService.updateUsuario(local);
               }
             } else {
-              // No existe en remoto, crear
+              // No existe en remoto → crearlo
               await _createUsuarioBackend(local);
             }
           } else {
-            // Nuevo usuario offline
+            // Usuario nuevo creado offline
             await _createUsuarioBackend(local);
           }
         } catch (e) {
-          print('Error sincronizando usuario ${local.nombre}: $e');
+          print('❌ Error sincronizando usuario ${local.nombre}: $e');
           success = false;
         }
       }
 
-      // 3️⃣ Descargar cambios remotos y actualizar locales
-      final todosLocales = await _localService.getUsuarios();
-      for (var remote in remoteUsuarios) {
-        final local = todosLocales.firstWhere(
-                (l) => l.id == remote.id,
-            orElse: () => Usuario(id: 0, nombre: '', correo: '', edad: 0));
+      // 5️⃣ Descargar lista remota actualizada
+      final listaServidor = await _fetchRemoteUsuarios();
 
-        if (local.id == 0) {
-          // Nuevo en remoto
-          remote.sincronizado = 1;
-          await _localService.insertUsuario(remote);
-        } else if (_isDifferent(local, remote)) {
-          remote.sincronizado = 1;
-          await _localService.updateUsuario(remote);
-        } else {
-          // Marcar sincronizado
-          local.sincronizado = 1;
-          await _localService.updateUsuario(local);
-        }
+      // 6️⃣ Limpiar base local y reemplazar con datos actualizados
+      await _localService.clearUsuarios();
+      for (var remote in listaServidor) {
+        remote.sincronizado = 1;
+        await _localService.insertUsuario(remote);
       }
+
     } catch (e) {
-      print('Error general de sincronización: $e');
+      print('⚠️ Error general de sincronización: $e');
       success = false;
     }
 
@@ -106,10 +103,10 @@ class SyncService {
         final List data = jsonDecode(response.body);
         return data.map((json) => Usuario.fromJson(json)).toList();
       } else {
-        print('Error obteniendo usuarios remotos: ${response.statusCode}');
+        print('⚠️ Error obteniendo usuarios remotos: ${response.statusCode}');
       }
     } catch (e) {
-      print('Error obteniendo usuarios remotos: $e');
+      print('⚠️ Error obteniendo usuarios remotos: $e');
     }
     return [];
   }
@@ -129,10 +126,10 @@ class SyncService {
         u.sincronizado = 1;
         await _localService.updateUsuario(u);
       } else {
-        print('Error creando usuario en servidor: ${response.statusCode}');
+        print('❌ Error creando usuario en servidor: ${response.statusCode}');
       }
     } catch (e) {
-      print('Error creando usuario en servidor: $e');
+      print('❌ Error creando usuario en servidor: $e');
     }
   }
 
@@ -149,14 +146,14 @@ class SyncService {
         u.sincronizado = 1;
         await _localService.updateUsuario(u);
       } else {
-        print('Error actualizando usuario ${u.id} en servidor: ${response.statusCode}');
+        print('❌ Error actualizando usuario ${u.id} en servidor: ${response.statusCode}');
       }
     } catch (e) {
-      print('Error actualizando usuario ${u.id} en servidor: $e');
+      print('❌ Error actualizando usuario ${u.id} en servidor: $e');
     }
   }
 
-  /// Comprueba si hay diferencias entre local y remoto
+  /// Compara campos relevantes para detectar diferencias
   bool _isDifferent(Usuario local, Usuario remote) {
     return local.nombre != remote.nombre ||
         local.correo != remote.correo ||

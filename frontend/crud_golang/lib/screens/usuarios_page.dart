@@ -1,7 +1,9 @@
 import 'dart:async';
-import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:http/http.dart' as http;
+
 import '../models/usuario.dart';
 import '../services/local_storage_service.dart';
 import '../services/api_service.dart';
@@ -35,14 +37,13 @@ class _UsuariosPageState extends State<UsuariosPage> {
   @override
   void initState() {
     super.initState();
-    _verificarConexionReal();
+    _inicializar();
 
     Connectivity().onConnectivityChanged.listen((_) async {
       await _verificarConexionReal();
       _resetearSincronizacionAutomatica();
     });
 
-    listarUsuarios();
   }
 
   @override
@@ -55,8 +56,17 @@ class _UsuariosPageState extends State<UsuariosPage> {
     super.dispose();
   }
 
+  Future<void> _inicializar() async {
+    await _verificarConexionReal(); // espera a verificar conexión
+    if (!modoOffline) {
+      await _syncService.syncUsuarios(); // solo sincroniza si hay conexión
+    }
+    await listarUsuarios();
+  }
+  /// Verifica si hay conexión y si el servidor está disponible
   Future<void> _verificarConexionReal() async {
     try {
+      // Revisar conectividad básica
       var result = await Connectivity().checkConnectivity();
       if (result == ConnectivityResult.none) {
         setState(() {
@@ -66,20 +76,33 @@ class _UsuariosPageState extends State<UsuariosPage> {
         return;
       }
 
-      final socket = await Socket.connect(
-        '192.168.0.111',
-        8081,
-        timeout: const Duration(seconds: 2),
-      );
-      socket.destroy();
+      // Determinar IP/host según plataforma
+      String host = '192.168.0.111'; // IP del servidor en tu red local
+      if (!kIsWeb) {
+        host = '10.0.2.2'; // Para emulador Android
+      }
 
-      setState(() {
-        modoOffline = false;
-        estadoConexion = "Conectado";
-      });
+      // Endpoint correcto de tu servidor
+      final url = Uri.parse('http://$host:8081/usuarios');
 
-      listarUsuarios();
-    } catch (_) {
+      // Intentar conectarse al servidor
+      final response = await http.get(url).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        setState(() {
+          modoOffline = false;
+          estadoConexion = "Conectado";
+        });
+        // Actualizar lista de usuarios desde servidor/local
+        await listarUsuarios();
+      } else {
+        setState(() {
+          modoOffline = true;
+          estadoConexion = "Servidor no disponible";
+        });
+      }
+    } catch (e) {
+      // Captura cualquier error de conexión
       setState(() {
         modoOffline = true;
         estadoConexion = "Servidor no disponible";
@@ -87,17 +110,18 @@ class _UsuariosPageState extends State<UsuariosPage> {
     }
   }
 
+
+  /// Listar todos los usuarios desde almacenamiento local
   Future<void> listarUsuarios() async {
     try {
       final data = await _localService.getUsuarios();
       setState(() => usuarios = data);
-      _mostrarMensaje('Lista cargada', isError: false);
-    }
-    catch (e)
-    { _mostrarMensaje('Error al listar usuarios: $e', isError: true);
+    } catch (e) {
+      _mostrarMensaje('Error al listar usuarios: $e', isError: true);
     }
   }
 
+  /// Buscar usuario por ID
   Future<void> buscarUsuario() async {
     final idText = idController.text.trim();
     if (idText.isEmpty) {
@@ -114,38 +138,44 @@ class _UsuariosPageState extends State<UsuariosPage> {
     try {
       Usuario? usuario;
 
-      // 1️⃣ Intentar buscar en el servidor primero
-      try {
-        usuario = await ApiService.getUsuarioById(id);
-
-        if (usuario != null) {
-          _mostrarMensaje('Usuario encontrado en el servidor', isError: false);
-          // Guardar o actualizar en la base local
-          await _localService.insertUsuario(usuario);
-        } else {
-          _mostrarMensaje('Usuario no encontrado en el servidor', isError: true);
-        }
-      } catch (e) {
-        // Error de conexión u otro fallo de API
-        _mostrarMensaje('No se pudo conectar al servidor. Buscando localmente...', isError: true);
-      }
-
-      // 2️⃣ Si no se encontró o hubo error, buscar localmente
-      if (usuario == null) {
-        usuario = await _localService.getUsuarioById(id);
-        if (usuario != null) {
-          _mostrarMensaje('Usuario encontrado localmente', isError: false);
-        } else {
-          _mostrarMensaje('Usuario no encontrado ni en servidor ni localmente', isError: true);
-          return;
+      if (!modoOffline) {
+        try {
+          usuario = await ApiService.getUsuarioById(id);
+          if (usuario != null) await _localService.insertUsuario(usuario);
+        } catch (_) {
+          _mostrarMensaje('Error con servidor, buscando localmente...', isError: true);
         }
       }
 
-      // 3️⃣ Mostrar el resultado en la interfaz
-      setState(() => usuarios = [usuario!]);
+      usuario ??= await _localService.getUsuarioById(id);
 
+      if (usuario != null) {
+        setState(() => usuarios = [usuario!]);
+        _mostrarMensaje('Usuario encontrado', isError: false);
+      } else {
+        _mostrarMensaje('Usuario no encontrado', isError: true);
+      }
     } catch (e) {
       _mostrarMensaje('Error al buscar usuario: $e', isError: true);
+    }
+  }
+
+  /// Agregar nuevo usuario con confirmación
+  Future<void> confirmarAgregar() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirmar'),
+        content: const Text('¿Desea guardar este usuario?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancelar')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Guardar')),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await agregarUsuario();
     }
   }
 
@@ -157,32 +187,45 @@ class _UsuariosPageState extends State<UsuariosPage> {
       return;
     }
 
-    bool confirmar = await _confirmarAccion(
-        '¿Desea agregar este usuario?');
-    if (!confirmar) return;
-
     final usuario = Usuario(
       nombre: nombreController.text,
       correo: correoController.text,
-      edad: int.parse(edadController.text),
+      edad: int.tryParse(edadController.text) ?? 0,
       sincronizado: 0,
     );
 
     try {
       await _localService.insertUsuario(usuario);
-      _mostrarMensaje('Usuario guardado localmente', isError: false);
 
       if (!modoOffline) {
         final u = await ApiService.createUsuario(usuario);
         await _localService.updateUsuario(u);
-        _mostrarMensaje('Usuario guardado en el servidor', isError: false);
-
       }
 
+      _mostrarMensaje('Usuario agregado', isError: false);
       listarUsuarios();
       limpiarCampos();
     } catch (e) {
-      _mostrarMensaje('Error al guardar usuario: $e', isError: true);
+      _mostrarMensaje('Error al agregar usuario: $e', isError: true);
+    }
+  }
+
+  /// Actualizar usuario con confirmación
+  Future<void> confirmarActualizar() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirmar'),
+        content: const Text('¿Desea actualizar este usuario?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancelar')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Actualizar')),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await actualizarUsuario();
     }
   }
 
@@ -192,14 +235,10 @@ class _UsuariosPageState extends State<UsuariosPage> {
       return;
     }
 
-    bool confirmar = await _confirmarAccion(
-        '¿Desea actualizar este usuario?');
-    if (!confirmar) return;
-
     usuarioEditando!
       ..nombre = nombreController.text
       ..correo = correoController.text
-      ..edad = int.parse(edadController.text)
+      ..edad = int.tryParse(edadController.text) ?? 0
       ..sincronizado = 0;
 
     try {
@@ -220,25 +259,41 @@ class _UsuariosPageState extends State<UsuariosPage> {
     }
   }
 
-  Future<void> eliminarUsuarioOffline(Usuario u) async {
-    bool confirmar = await _confirmarAccion(
-        '¿Desea eliminar este usuario?');
-    if (!confirmar) return;
+  /// Confirmar eliminación
+  Future<void> confirmarEliminar(Usuario u) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirmar eliminación'),
+        content: Text('¿Desea eliminar al usuario ${u.nombre}?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancelar')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Eliminar')),
+        ],
+      ),
+    );
 
+    if (confirm == true) {
+      await eliminarUsuarioOffline(u);
+    }
+  }
+
+  /// Eliminar usuario (soft delete)
+  Future<void> eliminarUsuarioOffline(Usuario u) async {
     u.sincronizado = -1;
     await _localService.updateUsuario(u);
-    _mostrarMensaje('Usuario marcado para eliminación offline', isError: false);
+    _mostrarMensaje('Usuario marcado para eliminación', isError: false);
 
     if (!modoOffline) {
       await ApiService.deleteUsuario(u.id!);
       await _localService.deleteUsuario(u.id!);
-      _mostrarMensaje('Usuario eliminado en el servidor', isError: false);
-
+      _mostrarMensaje('Usuario eliminado en servidor', isError: false);
     }
 
     listarUsuarios();
   }
 
+  /// Restaurar usuario eliminado
   void restaurarUsuario(Usuario u) async {
     u.sincronizado = 0;
     await _localService.updateUsuario(u);
@@ -265,6 +320,7 @@ class _UsuariosPageState extends State<UsuariosPage> {
   }
 
   void _mostrarMensaje(String mensaje, {bool isError = false}) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(mensaje),
@@ -272,27 +328,6 @@ class _UsuariosPageState extends State<UsuariosPage> {
         duration: const Duration(seconds: 2),
       ),
     );
-  }
-
-  Future<bool> _confirmarAccion(String mensaje) async {
-    return await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Confirmación'),
-        content: Text(mensaje),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancelar'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Aceptar'),
-          ),
-        ],
-      ),
-    ) ??
-        false;
   }
 
   void _resetearSincronizacionAutomatica() {
@@ -311,17 +346,15 @@ class _UsuariosPageState extends State<UsuariosPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('CRUD Usuarios Offline-First'),
+        title: const Text('CRUD Golang & Flutter'),
         backgroundColor: modoOffline ? Colors.red : Colors.green,
         actions: [
           IconButton(
             icon: const Icon(Icons.sync),
             onPressed: () async {
               _mostrarMensaje('Sincronizando...', isError: false);
-
               try {
                 await _syncService.syncUsuarios();
-                // Refrescar lista **después de sincronizar**
                 await listarUsuarios();
                 _mostrarMensaje('Sincronización completada', isError: false);
               } catch (e) {
@@ -376,8 +409,8 @@ class _UsuariosPageState extends State<UsuariosPage> {
               children: [
                 ElevatedButton(onPressed: listarUsuarios, child: const Text('Listar')),
                 ElevatedButton(onPressed: buscarUsuario, child: const Text('Buscar')),
-                ElevatedButton(onPressed: agregarUsuario, child: const Text('Agregar')),
-                ElevatedButton(onPressed: actualizarUsuario, child: const Text('Actualizar')),
+                ElevatedButton(onPressed: confirmarAgregar, child: const Text('Agregar')),
+                ElevatedButton(onPressed: confirmarActualizar, child: const Text('Actualizar')),
               ],
             ),
             const SizedBox(height: 20),
@@ -398,14 +431,11 @@ class _UsuariosPageState extends State<UsuariosPage> {
                         children: [
                           Text(u.id?.toString() ?? ''),
                           if (u.sincronizado == -1)
-                            const Icon(Icons.delete_forever,
-                                color: Colors.orange, size: 16)
+                            const Icon(Icons.delete_forever, color: Colors.orange, size: 16)
                           else if (u.sincronizado == 0)
-                            const Icon(Icons.sync_problem,
-                                color: Colors.orange, size: 16)
+                            const Icon(Icons.sync_problem, color: Colors.orange, size: 16)
                           else
-                            const Icon(Icons.check_circle,
-                                color: Colors.green, size: 16),
+                            const Icon(Icons.check_circle, color: Colors.green, size: 16),
                         ],
                       ),
                       trailing: Wrap(
@@ -423,7 +453,7 @@ class _UsuariosPageState extends State<UsuariosPage> {
                             ),
                             IconButton(
                               icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () => eliminarUsuarioOffline(u),
+                              onPressed: () => confirmarEliminar(u),
                             ),
                           ]
                         ],

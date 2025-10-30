@@ -26,6 +26,9 @@ dependencies:
 
   # Serialización JSON
   json_annotation: ^4.9.0
+  # web
+  sembast: ^3.7.1
+  sembast_web: ^2.3.0
 
 dev_dependencies:
   flutter_test:
