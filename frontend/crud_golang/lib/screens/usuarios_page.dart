@@ -98,7 +98,7 @@ class _UsuariosPageState extends State<UsuariosPage> {
       } else {
         setState(() {
           modoOffline = true;
-          estadoConexion = "Servidor no disponible";
+          estadoConexion = "Desconectado";
         });
       }
     } catch (e) {
@@ -122,43 +122,63 @@ class _UsuariosPageState extends State<UsuariosPage> {
   }
 
   /// Buscar usuario por ID
+  /// Busca un usuario por ID, primero en el servidor (si hay conexión)
+  /// y luego en la base de datos local si no se encuentra o hay error.
+  /// Actualiza la UI con el resultado y muestra mensajes al usuario.
   Future<void> buscarUsuario() async {
+    // 1️⃣ Obtiene el texto ingresado en el campo de ID y elimina espacios en blanco
     final idText = idController.text.trim();
+
+    // 2️⃣ Validación: si el campo está vacío, muestra mensaje de error y termina
     if (idText.isEmpty) {
       _mostrarMensaje('Ingrese un ID para buscar', isError: true);
-      return;
+      return; // Sale de la función
     }
 
+    // 3️⃣ Intenta convertir el texto a un número entero
     final id = int.tryParse(idText);
     if (id == null) {
+      // Si la conversión falla → ID inválido
       _mostrarMensaje('ID inválido', isError: true);
       return;
     }
 
     try {
-      Usuario? usuario;
+      Usuario? usuario; // Variable para almacenar el usuario encontrado (nullable)
 
+      // 4️⃣ Si no estamos en modo offline, buscar primero en el servidor
       if (!modoOffline) {
         try {
+          // Llamada asíncrona al servidor
           usuario = await ApiService.getUsuarioById(id);
+
+          // Si el usuario se encuentra en el servidor, guardarlo en local
           if (usuario != null) await _localService.insertUsuario(usuario);
         } catch (_) {
+          // Si hay error con el servidor, informar y continuar con búsqueda local
           _mostrarMensaje('Error con servidor, buscando localmente...', isError: true);
         }
       }
 
+      // 5️⃣ Si no se encontró en el servidor o estamos en modo offline,
+      // buscar en la base de datos local
       usuario ??= await _localService.getUsuarioById(id);
 
+      // 6️⃣ Actualizar UI según resultado
       if (usuario != null) {
+        // Se encontró el usuario → actualizar lista de usuarios mostrada
         setState(() => usuarios = [usuario!]);
         _mostrarMensaje('Usuario encontrado', isError: false);
       } else {
+        // No se encontró → mostrar mensaje de error
         _mostrarMensaje('Usuario no encontrado', isError: true);
       }
     } catch (e) {
+      // Captura cualquier error inesperado durante la búsqueda
       _mostrarMensaje('Error al buscar usuario: $e', isError: true);
     }
   }
+
 
   /// Agregar nuevo usuario con confirmación
   Future<void> confirmarAgregar() async {
@@ -414,58 +434,83 @@ class _UsuariosPageState extends State<UsuariosPage> {
               ],
             ),
             const SizedBox(height: 20),
+            // Expanded para la lista
             Expanded(
-              child: usuarios.isEmpty
-                  ? const Center(child: Text('No hay usuarios'))
-                  : ListView.builder(
-                itemCount: usuarios.length,
-                itemBuilder: (context, index) {
-                  final u = usuarios[index];
-                  return Card(
-                    margin: const EdgeInsets.symmetric(vertical: 5),
-                    child: ListTile(
-                      title: Text(u.nombre),
-                      subtitle: Text('${u.correo} | Edad: ${u.edad}'),
-                      leading: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(u.id?.toString() ?? ''),
-                          if (u.sincronizado == -1)
-                            const Icon(Icons.delete_forever, color: Colors.orange, size: 16)
-                          else if (u.sincronizado == 0)
-                            const Icon(Icons.sync_problem, color: Colors.orange, size: 16)
-                          else
-                            const Icon(Icons.check_circle, color: Colors.green, size: 16),
-                        ],
-                      ),
-                      trailing: Wrap(
-                        spacing: 8,
-                        children: [
-                          if (u.sincronizado == -1)
-                            IconButton(
-                              icon: const Icon(Icons.restore, color: Colors.blue),
-                              onPressed: () => restaurarUsuario(u),
-                            )
-                          else ...[
-                            IconButton(
-                              icon: const Icon(Icons.edit, color: Colors.blue),
-                              onPressed: () => seleccionarUsuario(u),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () => confirmarEliminar(u),
-                            ),
-                          ]
-                        ],
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Label con la cantidad de registros
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    child: Text(
+                      'Total de usuarios: ${usuarios.length}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
                       ),
                     ),
-                  );
-                },
+                  ),
+                  const SizedBox(height: 8),
+                  // Lista de usuarios
+                  Expanded(
+                    child: usuarios.isEmpty
+                        ? const Center(child: Text('No hay usuarios'))
+                        : ListView.builder(
+                      itemCount: usuarios.length,
+                      itemBuilder: (context, index) {
+                        final u = usuarios[index];
+                        return Card(
+                          margin: const EdgeInsets.symmetric(vertical: 5),
+                          child: ListTile(
+                            title: Text(u.nombre),
+                            subtitle: Text('${u.correo} | Edad: ${u.edad}'),
+                            leading: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(u.id?.toString() ?? ''),
+                                if (u.sincronizado == -1)
+                                  const Icon(Icons.delete_forever,
+                                      color: Colors.orange, size: 16)
+                                else if (u.sincronizado == 0)
+                                  const Icon(Icons.sync_problem,
+                                      color: Colors.orange, size: 16)
+                                else
+                                  const Icon(Icons.check_circle,
+                                      color: Colors.green, size: 16),
+                              ],
+                            ),
+                            trailing: Wrap(
+                              spacing: 8,
+                              children: [
+                                if (u.sincronizado == -1)
+                                  IconButton(
+                                    icon: const Icon(Icons.restore, color: Colors.blue),
+                                    onPressed: () => restaurarUsuario(u),
+                                  )
+                                else ...[
+                                  IconButton(
+                                    icon: const Icon(Icons.edit, color: Colors.blue),
+                                    onPressed: () => seleccionarUsuario(u),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete, color: Colors.red),
+                                    onPressed: () => confirmarEliminar(u),
+                                  ),
+                                ]
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
         ),
       ),
     );
+
   }
 }
